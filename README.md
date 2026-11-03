@@ -1,14 +1,3 @@
-# burn-my-credits
-
-Spends your own Claude or OpenAI API credits as fast as it can. It runs several workers in parallel. Each one sends large prompts that ask for the longest possible response, over and over, until you stop it.
-
-> **Warning:** This tool exists to spend money. Use it only with an API key you own, and set spending limits on your account first.
-
-## Requirements
-
-- Rust (edition 2024)
-- `curl` on your `PATH`
-
 ## Usage
 
 ```sh
