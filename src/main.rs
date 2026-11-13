@@ -5,7 +5,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use std::{env, fs, thread, time::Duration};
+use std::{env, thread, time::Duration};
 
 static REQS: AtomicU64 = AtomicU64::new(0);
 static IN_TOK: AtomicU64 = AtomicU64::new(0);
@@ -56,16 +56,15 @@ fn main() {
     let url = request_url(provider, &model);
     let body = request_body(provider, &model, &prompt);
 
-    let body_path = env::temp_dir().join(format!("burn-body-{}.json", std::process::id()));
-    fs::write(&body_path, &body).expect("write body");
-    let config = curl_config(provider, auth, &key);
+    // The body goes through curl's stdin config too, so there's no temp file to clean up.
+    let config = curl_config(provider, auth, &key) + &config_entry("data-binary", &body);
 
     println!("burning {provider} credits with {workers} workers on {model} (Ctrl+C to stop)");
     for i in 0..workers {
-        let (url, config, body_path) = (url.clone(), config.clone(), body_path.clone());
+        let (url, config) = (url.clone(), config.clone());
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(i as u64 * 250)); // stagger start
-            worker(&url, &config, body_path.to_str().unwrap());
+            worker(&url, &config);
         });
     }
     loop {
@@ -77,13 +76,11 @@ fn main() {
     }
 }
 
-fn worker(url: &str, config: &str, body_path: &str) {
+fn worker(url: &str, config: &str) {
     let mut backoff = 1;
     loop {
         let mut child = Command::new("curl")
-            .args(["-sS", "-K", "-", "-w", "\n%{http_code}", "--data-binary"])
-            .arg(format!("@{body_path}"))
-            .arg(url)
+            .args(["-sS", "-K", "-", "-w", "\n%{http_code}", url])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -186,6 +183,12 @@ fn check_key(provider: &str, key: &str) -> KeyCheck {
     }
 }
 
+/// One `name = "value"` line of a curl config file, with the value quoted.
+fn config_entry(name: &str, value: &str) -> String {
+    let value = value.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+    format!("{name} = \"{value}\"\n")
+}
+
 fn num_after(s: &str, keys: &[&str]) -> u64 {
     keys.iter()
         .find_map(|k| s.find(k).map(|i| &s[i + k.len()..]))
@@ -273,5 +276,10 @@ mod tests {
         assert!(c.contains("header = \"x-api-key: k\""));
         assert!(c.contains("anthropic-version: 2023-06-01"));
         assert!(!curl_config("openai", "Authorization: Bearer ", "k").contains("anthropic-version"));
+    }
+
+    #[test]
+    fn config_entry_escapes_quotes_backslashes_and_newlines() {
+        assert_eq!(config_entry("data-binary", "{\"a\":\"x\\\"y\nz\"}"), "data-binary = \"{\\\"a\\\":\\\"x\\\\\\\"y\\nz\\\"}\"\n");
     }
 }
