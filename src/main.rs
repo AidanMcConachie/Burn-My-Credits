@@ -1,6 +1,6 @@
-//! burn-my-credits: drain your own Claude or OpenAI API credits via curl.
-//! Usage: burn-my-credits <claude|openai> [workers=8] [model] [--key <API_KEY>]
-//! Without --key, reads ANTHROPIC_API_KEY or OPENAI_API_KEY from the environment.
+//! burn-my-credits: drain your own Claude, OpenAI or Gemini API credits via curl.
+//! Usage: burn-my-credits <claude|openai|gemini> [workers=8] [model] [--key <API_KEY>]
+//! Without --key, reads ANTHROPIC_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY from the environment.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -31,11 +31,12 @@ fn main() {
     let provider = args.get(1).map(String::as_str).unwrap_or("");
     let workers: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(8);
 
-    let (url, key_var, default_model, auth) = match provider {
-        "claude" => ("https://api.anthropic.com/v1/messages", "ANTHROPIC_API_KEY", "claude-opus-5-5", "x-api-key: "),
-        "openai" => ("https://api.openai.com/v1/chat/completions", "OPENAI_API_KEY", "gpt-5", "Authorization: Bearer "),
+    let (key_var, default_model, auth) = match provider {
+        "claude" => ("ANTHROPIC_API_KEY", "claude-opus-5-5", "x-api-key: "),
+        "openai" => ("OPENAI_API_KEY", "gpt-5", "Authorization: Bearer "),
+        "gemini" => ("GEMINI_API_KEY", "gemini-4-argon", "x-goog-api-key: "),
         _ => {
-            eprintln!("usage: burn-my-credits <claude|openai> [workers=8] [model] [--key <API_KEY>]");
+            eprintln!("usage: burn-my-credits <claude|openai|gemini> [workers=8] [model] [--key <API_KEY>]");
             std::process::exit(1);
         }
     };
@@ -52,11 +53,8 @@ fn main() {
          on the complete history of computing. Never summarize, never stop early, use every token available."
     );
     let prompt = json_escape(&prompt);
-    let body = if provider == "claude" {
-        format!(r#"{{"model":"{model}","max_tokens":{MAX_OUT},"messages":[{{"role":"user","content":"{prompt}"}}]}}"#)
-    } else {
-        format!(r#"{{"model":"{model}","max_completion_tokens":{MAX_OUT},"messages":[{{"role":"user","content":"{prompt}"}}]}}"#)
-    };
+    let url = request_url(provider, &model);
+    let body = request_body(provider, &model, &prompt);
 
     let body_path = env::temp_dir().join(format!("burn-body-{}.json", std::process::id()));
     fs::write(&body_path, &body).expect("write body");
@@ -64,7 +62,7 @@ fn main() {
 
     println!("burning {provider} credits with {workers} workers on {model} (Ctrl+C to stop)");
     for i in 0..workers {
-        let (url, config, body_path) = (url.to_string(), config.clone(), body_path.clone());
+        let (url, config, body_path) = (url.clone(), config.clone(), body_path.clone());
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(i as u64 * 250)); // stagger start
             worker(&url, &config, body_path.to_str().unwrap());
@@ -98,8 +96,9 @@ fn worker(url: &str, config: &str, body_path: &str) {
             "200" => {
                 backoff = 1;
                 REQS.fetch_add(1, Relaxed);
-                IN_TOK.fetch_add(num_after(resp, &["\"input_tokens\":", "\"prompt_tokens\":"]), Relaxed);
-                OUT_TOK.fetch_add(num_after(resp, &["\"output_tokens\":", "\"completion_tokens\":"]), Relaxed);
+                let (input, output) = usage(resp);
+                IN_TOK.fetch_add(input, Relaxed);
+                OUT_TOK.fetch_add(output, Relaxed);
             }
             // Rate limited / overloaded / transient: back off exponentially, up to 60s.
             "429" | "500" | "502" | "503" | "529" | "000" => {
@@ -112,6 +111,33 @@ fn worker(url: &str, config: &str, body_path: &str) {
             }
         }
     }
+}
+
+/// Gemini puts the model in the URL; the others put it in the body.
+fn request_url(provider: &str, model: &str) -> String {
+    match provider {
+        "claude" => "https://api.anthropic.com/v1/messages".into(),
+        "openai" => "https://api.openai.com/v1/chat/completions".into(),
+        _ => format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"),
+    }
+}
+
+/// `prompt` must already be JSON-escaped.
+fn request_body(provider: &str, model: &str, prompt: &str) -> String {
+    match provider {
+        "claude" => format!(r#"{{"model":"{model}","max_tokens":{MAX_OUT},"messages":[{{"role":"user","content":"{prompt}"}}]}}"#),
+        "openai" => format!(r#"{{"model":"{model}","max_completion_tokens":{MAX_OUT},"messages":[{{"role":"user","content":"{prompt}"}}]}}"#),
+        _ => format!(r#"{{"contents":[{{"role":"user","parts":[{{"text":"{prompt}"}}]}}],"generationConfig":{{"maxOutputTokens":{MAX_OUT}}}}}"#),
+    }
+}
+
+/// (input, output) tokens from a response. Gemini reports thinking separately
+/// from `candidatesTokenCount`, but it's billed as output, so it's included.
+fn usage(resp: &str) -> (u64, u64) {
+    let input = num_after(resp, &["\"input_tokens\":", "\"prompt_tokens\":", "\"promptTokenCount\":"]);
+    let output = num_after(resp, &["\"output_tokens\":", "\"completion_tokens\":", "\"candidatesTokenCount\":"])
+        + num_after(resp, &["\"thoughtsTokenCount\":"]);
+    (input, output)
 }
 
 /// Headers go through curl's stdin config so the key never shows up in `ps`.
@@ -139,6 +165,7 @@ fn check_key(provider: &str, key: &str) -> KeyCheck {
     let (url, auth) = match provider {
         "claude" => ("https://api.anthropic.com/v1/models", "x-api-key: "),
         "openai" => ("https://api.openai.com/v1/models", "Authorization: Bearer "),
+        "gemini" => ("https://generativelanguage.googleapis.com/v1beta/models", "x-goog-api-key: "),
         p => return KeyCheck::Unknown(format!("unknown provider {p}")),
     };
     let mut child = Command::new("curl")
@@ -153,6 +180,8 @@ fn check_key(provider: &str, key: &str) -> KeyCheck {
     match code.trim() {
         "200" => KeyCheck::Valid,
         c @ ("401" | "403") => KeyCheck::Invalid(format!("HTTP {c}: {resp}")),
+        // Gemini answers a bad key with a 400 rather than a 401.
+        c @ "400" if resp.contains("API_KEY_INVALID") => KeyCheck::Invalid(format!("HTTP {c}: {resp}")),
         c => KeyCheck::Unknown(format!("HTTP {c}: {resp}")),
     }
 }
@@ -193,6 +222,11 @@ mod tests {
     }
 
     #[test]
+    fn gemini_key_from_env_is_valid() {
+        assert_env_key_valid("gemini", "GEMINI_API_KEY");
+    }
+
+    #[test]
     fn bogus_anthropic_key_is_rejected() {
         let r = check_key("claude", "sk-ant-not-a-real-key");
         assert!(matches!(r, KeyCheck::Invalid(_)), "{r:?}");
@@ -202,6 +236,35 @@ mod tests {
     fn bogus_openai_key_is_rejected() {
         let r = check_key("openai", "sk-not-a-real-key");
         assert!(matches!(r, KeyCheck::Invalid(_)), "{r:?}");
+    }
+
+    #[test]
+    fn bogus_gemini_key_is_rejected() {
+        let r = check_key("gemini", "not-a-real-key");
+        assert!(matches!(r, KeyCheck::Invalid(_)), "{r:?}");
+    }
+
+    #[test]
+    fn gemini_request_puts_model_in_url_and_not_body() {
+        assert_eq!(
+            request_url("gemini", "gemini-x"),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-x:generateContent"
+        );
+        assert_eq!(
+            request_body("gemini", "gemini-x", "hi"),
+            format!(r#"{{"contents":[{{"role":"user","parts":[{{"text":"hi"}}]}}],"generationConfig":{{"maxOutputTokens":{MAX_OUT}}}}}"#)
+        );
+    }
+
+    #[test]
+    fn usage_reads_each_providers_format() {
+        assert_eq!(usage(r#"{"usage":{"input_tokens":10,"output_tokens":20}}"#), (10, 20));
+        assert_eq!(usage(r#"{"usage":{"prompt_tokens":10,"completion_tokens":20}}"#), (10, 20));
+        // Gemini pretty-prints its JSON and counts thinking separately.
+        let gemini = r#"{"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 20, "thoughtsTokenCount": 5, "totalTokenCount": 35}}"#;
+        assert_eq!(usage(gemini), (10, 25));
+        // All of the budget went on thinking, so there's no candidates count.
+        assert_eq!(usage(r#"{"usageMetadata": {"promptTokenCount": 10, "thoughtsTokenCount": 5}}"#), (10, 5));
     }
 
     #[test]
