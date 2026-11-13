@@ -21,16 +21,15 @@ cargo run --release -- openai 16 --key sk-...
 # Claude with 4 workers on a cheaper model
 cargo run --release -- claude 4 claude-haiku-5-5
 
-# Gemini with the defaults (8 workers, gemini-4-argon), key from the environment
+# Gemini with the defaults (8 workers, gemini-4-hydrogen), key from the environment
 export GEMINI_API_KEY=...
 cargo run --release -- gemini
 ```
 
-The default models are `claude-opus-5-5`, `gpt-5` and `gemini-4-argon`. Every 5 seconds it prints how many requests and tokens it has used so far. Press Ctrl+C to stop.
+The default models are `claude-opus-5-5`, `gpt-5` and `gemini-4-hydrogen` (the default Gemini model). Every 5 seconds it prints how many requests and tokens it has used so far. Press Ctrl+C to stop.
 
 ## Notes
 
 - If the API returns a rate-limit or server error, the worker waits and retries, doubling the wait each time up to 60 seconds. Any other error stops the program.
 - The API key is passed to curl through stdin, so it doesn't appear in `ps` output.
-- `gemini-4-argon` isn't available on Gemini's free tier, so pass a different model if your key is on that tier.
 - Gemini's output token count includes thinking tokens.

@@ -34,7 +34,7 @@ fn main() {
     let (key_var, default_model, auth) = match provider {
         "claude" => ("ANTHROPIC_API_KEY", "claude-opus-5-5", "x-api-key: "),
         "openai" => ("OPENAI_API_KEY", "gpt-5", "Authorization: Bearer "),
-        "gemini" => ("GEMINI_API_KEY", "gemini-4-argon", "x-goog-api-key: "),
+        "gemini" => ("GEMINI_API_KEY", "gemini-4-hydrogen", "x-goog-api-key: "),
         _ => {
             eprintln!("usage: burn-my-credits <claude|openai|gemini> [workers=8] [model] [--key <API_KEY>]");
             std::process::exit(1);
